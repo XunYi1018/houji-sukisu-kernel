@@ -23,11 +23,15 @@ jobs:
       - name: Free disk space and configure swap
         run: |
           df -h
+          free -h
+          swapon --show || true
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if [ ! -e /swapfile_ci ]; then
+            sudo fallocate -l 4G /swapfile_ci
+            sudo chmod 600 /swapfile_ci
+            sudo mkswap /swapfile_ci
+            sudo swapon /swapfile_ci
+          fi
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           df -h
           free -h
