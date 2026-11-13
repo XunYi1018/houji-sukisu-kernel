@@ -1,0 +1,105 @@
+name: Build houji 6.1.138 GKI + SukiSU-Ultra + SuSFS v2.4.0
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_branch:
+        description: "SukiSU-Ultra branch"
+        required: false
+        default: "builtin"
+      susfs_branch:
+        description: "susfs4ksu branch"
+        required: false
+        default: "gki-android14-6.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space and configure swap
+        run: |
+          df -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          df -h
+          free -h
+
+      - name: Install build dependencies and repo tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git make gcc python-is-python3 rsync zip unzip bc bison flex libelf-dev libssl-dev cpio
+          git config --global user.name "houji-builder"
+          git config --global user.email "builder@users.noreply.github.com"
+          sudo curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod +x /usr/local/bin/repo
+
+      - name: Sync AOSP GKI android14-6.1-2025-06 (6.1.138)
+        run: |
+          mkdir -p "${{ github.workspace }}/kernel_workspace"
+          cd "${{ github.workspace }}/kernel_workspace"
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1-2025-06
+          mkdir -p .repo/local_manifests
+          python3 - <<'PY'
+          xml = '''<?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remove-project name="kernel/common" />
+            <project path="common" name="kernel/common" revision="deprecated/android14-6.1-2025-06" upstream="deprecated/android14-6.1-2025-06" dest-branch="deprecated/android14-6.1-2025-06" clone-depth="1" />
+          </manifest>
+          '''
+          import textwrap
+          with open(".repo/local_manifests/override_common.xml", "w", encoding="utf-8") as f:
+              f.write(textwrap.dedent(xml).lstrip())
+          PY
+          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
+          echo "common HEAD: $(git -C common rev-parse HEAD)"
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' common/Makefile
+
+      - name: Clone SukiSU-Ultra, susfs4ksu, and AnyKernel3
+        run: |
+          cd "${{ github.workspace }}/kernel_workspace"
+          mkdir -p upstream
+          git clone --depth=1 --branch "${{ inputs.ksu_branch }}" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git upstream/SukiSU-Ultra
+          git clone --depth=1 --branch "${{ inputs.susfs_branch }}" https://gitlab.com/simonpunk/susfs4ksu.git upstream/susfs4ksu
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git upstream/AnyKernel3
+
+      - name: Integrate SukiSU-Ultra and SuSFS v2.4.0
+        run: |
+          python3 "${{ github.workspace }}/scripts/prepare_sources.py" \
+            --workspace "${{ github.workspace }}/kernel_workspace" \
+            --ksu-branch "${{ inputs.ksu_branch }}"
+
+      - name: Build GKI kernel_aarch64 via Kleaf Bazel
+        run: |
+          cd "${{ github.workspace }}/kernel_workspace"
+          mkdir -p "${{ github.workspace }}/dist"
+          ./tools/bazel run \
+            --config=stamp \
+            --lto=thin \
+            --page_size=4k \
+            --nokmi_symbol_list_strict_mode \
+            --nokmi_symbol_list_violations_check \
+            //common:kernel_aarch64_dist -- \
+            --dist_dir="${{ github.workspace }}/dist"
+
+      - name: Verify Image and package artifacts
+        run: |
+          python3 "${{ github.workspace }}/scripts/package_artifacts.py" \
+            --workspace "${{ github.workspace }}/kernel_workspace" \
+            --dist-dir "${{ github.workspace }}/dist" \
+            --out-dir "${{ github.workspace }}/release_artifacts" \
+            --kernel-string "houji 6.1.138 SukiSU-Ultra ${{ env.KSU_VERSION_FULL }} + SuSFS ${{ env.SUSFS_VERSION }}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: houji-6.1.138-SukiSU-SuSFS-v2.4.0
+          path: ${{ github.workspace }}/release_artifacts/*
+          retention-days: 30

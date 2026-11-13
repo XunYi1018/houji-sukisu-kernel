@@ -1,0 +1,6 @@
+out/
+dist/
+kernel_workspace/
+*.img
+*.zip
+__pycache__/
