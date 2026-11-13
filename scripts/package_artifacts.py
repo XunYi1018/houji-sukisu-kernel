@@ -15,7 +15,7 @@ ANYKERNEL_SH = """### AnyKernel3 Ramdisk Mod Script
 
 ### AnyKernel setup
 properties() { '
-kernel.string={kernel_string}
+kernel.string=__KERNEL_STRING__
 do.devicecheck=0
 do.modules=0
 do.systemless=1
@@ -90,18 +90,19 @@ def collect_dotconfig(ws: str, out_dir: str) -> None:
         with open(dst, "r", encoding="utf-8") as f:
             txt = f.read()
         for key in (
-            "CONFIG_ARM64_4K_PAGES=",
-            "CONFIG_LTO_CLANG_THIN=",
-            "CONFIG_TRIM_UNUSED_KSYMS=",
-            "CONFIG_MODVERSIONS=",
-            "CONFIG_KSU=",
-            "CONFIG_KPM=",
-            "CONFIG_KSU_SUSFS=",
-            "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=",
-            "CONFIG_OVERLAY_FS=",
+            "CONFIG_ARM64_4K_PAGES",
+            "CONFIG_LTO_CLANG_THIN",
+            "CONFIG_TRIM_UNUSED_KSYMS",
+            "CONFIG_MODVERSIONS",
+            "CONFIG_KSU",
+            "CONFIG_KPM",
+            "CONFIG_KSU_DEBUG",
+            "CONFIG_KSU_SUSFS",
+            "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER",
+            "CONFIG_OVERLAY_FS",
         ):
             for line in txt.splitlines():
-                if key in line:
+                if line.startswith(f"{key}=") or line == f"# {key} is not set":
                     print(" ", line)
     else:
         print("Warning: .config not found in bazel-bin/ or out/")
@@ -125,6 +126,9 @@ def build_susfs_module(ws: str, out_dir: str) -> None:
             shutil.copy2(built_bin, os.path.join(out_dir, "ksu_susfs_arm64"))
     else:
         print("Warning: ndk-build not found; keeping upstream prebuilt ksu_susfs_arm64 binary.")
+        prebuilt_bin = os.path.join(susfs_dir, "ksu_module_susfs", "tools", "ksu_susfs_arm64")
+        if os.path.isfile(prebuilt_bin):
+            shutil.copy2(prebuilt_bin, os.path.join(out_dir, "ksu_susfs_arm64"))
 
     mod_dir = os.path.join(susfs_dir, "ksu_module_susfs")
     zip_out = os.path.join(out_dir, "ksu_module_susfs-v2.4.0.zip")
@@ -145,7 +149,7 @@ def package_anykernel3(ws: str, image_path: str, out_dir: str, kernel_string: st
     shutil.copytree(ak3_src, ak3_stage, ignore=shutil.ignore_patterns(".git", ".github", "ramdisk", "patch", "modules"))
 
     with open(os.path.join(ak3_stage, "anykernel.sh"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(ANYKERNEL_SH.format(kernel_string=kernel_string))
+        f.write(ANYKERNEL_SH.replace("__KERNEL_STRING__", kernel_string))
 
     shutil.copy2(image_path, os.path.join(ak3_stage, "Image"))
     ak3_zip = os.path.join(out_dir, "AnyKernel3-houji-6.1.138-SukiSU-SuSFS-v2.4.0.zip")
