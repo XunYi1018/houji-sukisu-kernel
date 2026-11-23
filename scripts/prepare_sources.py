@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integrate SukiSU-Ultra (builtin) and SuSFS (gki-android14-6.1) into AOSP common GKI 6.1.138."""
+"""将最新 SukiSU (builtin) 与 SuSFS v2.4.0 (gki-android14-6.1) 集成至小米 14 OS3.0.307.0 原厂基线 (0c3d559bcd85)。"""
 
 import argparse
 import glob
@@ -11,8 +11,15 @@ import subprocess
 import urllib.request
 
 
+STOCK_LOCALVERSION = "-android14-11-g0c3d559bcd85-ab14529422"
+STOCK_UTS_VERSION = "#1 SMP PREEMPT Wed Dec  3 02:05:30 UTC 2025"
+STOCK_COMPILE_BY = "build-user"
+STOCK_COMPILE_HOST = "build-host"
+
+# 保持与手机已安装的 SukiSU-Ultra v4.3.0-r2 (com.sukisu.ultra, 41150) 及 SukiSU-Nova v3.0.0 双向兼容
 KSU_VERSION_BASE = 40000
 KSU_VERSION_OFFSET = 2815
+KSU_PACKAGE_NAME = "com.sukisu.ultra"
 
 
 def run(cmd, cwd=None, check=True, capture=False):
@@ -27,26 +34,8 @@ def run(cmd, cwd=None, check=True, capture=False):
 
 
 def compute_sukisu_version(ksu_dir: str, branch: str) -> tuple[int, str]:
-    """Compute real KSU_VERSION and KSU_VERSION_FULL outside Bazel sandbox."""
+    """在 Bazel 沙箱外计算 KSU_VERSION 与 KSU_VERSION_FULL。"""
     short_sha = run(["git", "rev-parse", "--short=8", "HEAD"], cwd=ksu_dir, capture=True).stdout.strip()
-
-    tag = None
-    try:
-        with urllib.request.urlopen(
-            urllib.request.Request(
-                "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest",
-                headers={"User-Agent": "houji-builder"},
-            ),
-            timeout=15,
-        ) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            tag = (data.get("tag_name") or "").lstrip("v")
-    except Exception as exc:
-        print(f"Warning: GitHub releases API fallback ({exc})")
-
-    if not tag:
-        res = run(["git", "describe", "--tags", "--abbrev=0"], cwd=ksu_dir, check=False, capture=True)
-        tag = res.stdout.strip().lstrip("v") if res.returncode == 0 and res.stdout.strip() else "4.3.0"
 
     commit_count = None
     try:
@@ -65,20 +54,19 @@ def compute_sukisu_version(ksu_dir: str, branch: str) -> tuple[int, str]:
 
     if commit_count is None:
         res = run(["git", "rev-list", "--count", "HEAD"], cwd=ksu_dir, check=False, capture=True)
-        commit_count = int(res.stdout.strip()) if res.returncode == 0 else 3994
+        commit_count = int(res.stdout.strip()) if res.returncode == 0 else 4005
 
     ksu_version = KSU_VERSION_BASE + commit_count - KSU_VERSION_OFFSET
-    ksu_version_full = f"v{tag}-{short_sha}@{branch}"
+    ksu_version_full = f"v4.3.0-{short_sha}@{branch}"
     return ksu_version, ksu_version_full
 
 
-def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version: int, ksu_version_full: str) -> None:
+def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, ksu_version: int, ksu_version_full: str) -> None:
     dst_ksu = os.path.join(common_dir, "drivers", "kernelsu")
     if os.path.exists(dst_ksu):
         shutil.rmtree(dst_ksu)
     shutil.copytree(os.path.join(ksu_dir, "kernel"), dst_ksu, symlinks=False)
 
-    # Wire drivers/Makefile
     drivers_mk = os.path.join(common_dir, "drivers", "Makefile")
     with open(drivers_mk, "r", encoding="utf-8") as f:
         mk_txt = f.read()
@@ -90,7 +78,6 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version
         with open(drivers_mk, "w", encoding="utf-8", newline="\n") as f:
             f.write(mk_txt)
 
-    # Wire drivers/Kconfig right before final endmenu
     drivers_kc = os.path.join(common_dir, "drivers", "Kconfig")
     with open(drivers_kc, "r", encoding="utf-8") as f:
         kc_txt = f.read()
@@ -102,8 +89,6 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version
         with open(drivers_kc, "w", encoding="utf-8", newline="\n") as f:
             f.write(kc_txt)
 
-    # Install sanitized kernel UAPI headers inside drivers/kernelsu/uapi_hdrs
-    # (Bazel kernel_build does not run `make headers_install`, yet fs/exec.c expects preinit symbols unless KSU_NO_PREINIT matches everywhere.)
     uapi_dir = os.path.join(dst_ksu, "uapi_hdrs")
     hdr_tmp = "/tmp/houji_uapi_hdr_build"
     if os.path.exists(hdr_tmp):
@@ -119,7 +104,6 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version
     if not os.path.isfile(unistd_h):
         raise FileNotFoundError(f"Expected {unistd_h} after headers_install")
 
-    # Patch drivers/kernelsu/Makefile cleanly for Bazel offline sandbox
     ksu_mk = os.path.join(dst_ksu, "Makefile")
     with open(ksu_mk, "r", encoding="utf-8") as f:
         ksu_mk_txt = f.read()
@@ -140,11 +124,11 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version
 
     if "ccflags-y += -DKSU_VERSION=$(KSU_VERSION)" not in ksu_mk_txt:
         raise RuntimeError("Could not find KSU_VERSION ccflags in drivers/kernelsu/Makefile")
-    # Pin exact computed KSU_VERSION / KSU_VERSION_FULL right before ccflags-y
     pin_lines = (
         f"KSU_VERSION := {ksu_version}\n"
         f"KSU_VERSION_FULL := {ksu_version_full}\n"
-        "$(info -- $(REPO_NAME) pinned version: $(KSU_VERSION) [$(KSU_VERSION_FULL)])\n"
+        f"KSU_PACKAGE_NAME := {KSU_PACKAGE_NAME}\n"
+        "$(info -- $(REPO_NAME) pinned version: $(KSU_VERSION) [$(KSU_VERSION_FULL)] pkg=$(KSU_PACKAGE_NAME))\n"
     )
     ksu_mk_txt = ksu_mk_txt.replace(
         "ccflags-y += -DKSU_VERSION=$(KSU_VERSION)",
@@ -153,85 +137,6 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, branch: str, ksu_version
     )
     with open(ksu_mk, "w", encoding="utf-8", newline="\n") as f:
         f.write(ksu_mk_txt)
-
-
-def normalize_susfs_patch_for_aosp(patch_text: str) -> str:
-    """Fix 3 trailing #include context lines between android14-6.1-2025-06 (6.1.138) and newer 6.1 GKI."""
-    text = patch_text.replace("\r\n", "\n")
-
-    replacements = [
-        (
-            """ #include <linux/io_uring.h>
- #include <linux/syscall_user_dispatch.h>
- #include <linux/coredump.h>
-+#ifdef CONFIG_KSU_SUSFS
-+#include <linux/susfs_def.h>
-+#endif
- 
- #ifndef __GENKSYMS__
- #include <linux/dma-buf.h>""",
-            """ #include <linux/io_uring.h>
- #include <linux/syscall_user_dispatch.h>
- #include <linux/coredump.h>
-+#ifdef CONFIG_KSU_SUSFS
-+#include <linux/susfs_def.h>
-+#endif
- 
- #include <linux/uaccess.h>
- #include <asm/mmu_context.h>""",
-        ),
-        (
-            """@@ -32,11 +32,21 @@
- #include <linux/fs_context.h>
- #include <linux/shmem_fs.h>
- #include <linux/mnt_idmapping.h>
-+#ifdef CONFIG_KSU_SUSFS
-+#include <linux/susfs_def.h>
-+#endif // #ifdef CONFIG_KSU_SUSFS
- 
- #include "pnode.h"
- #include "internal.h"
- #include <trace/hooks/blk.h>""",
-            """@@ -32,10 +32,20 @@
- #include <linux/fs_context.h>
- #include <linux/shmem_fs.h>
- #include <linux/mnt_idmapping.h>
-+#ifdef CONFIG_KSU_SUSFS
-+#include <linux/susfs_def.h>
-+#endif // #ifdef CONFIG_KSU_SUSFS
- 
- #include "pnode.h"
- #include "internal.h\"""",
-        ),
-        (
-            """@@ -100,6 +100,10 @@
- #include <linux/cn_proc.h>
- #include <linux/cpufreq_times.h>
- #include <linux/dma-buf.h>
-+#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-+#include <linux/susfs_def.h>
-+#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-+
- #include <trace/events/oom.h>
- #include <trace/hooks/sched.h>
- #include "internal.h\"""",
-            """@@ -100,5 +100,9 @@
- #include <linux/cn_proc.h>
- #include <linux/cpufreq_times.h>
-+#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-+#include <linux/susfs_def.h>
-+#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-+
- #include <trace/events/oom.h>
- #include <trace/hooks/sched.h>
- #include "internal.h\"""",
-        ),
-    ]
-
-    for old, new in replacements:
-        if old in text:
-            text = text.replace(old, new, 1)
-    return text
 
 
 def apply_susfs(common_dir: str, susfs_dir: str) -> str:
@@ -249,15 +154,7 @@ def apply_susfs(common_dir: str, susfs_dir: str) -> str:
     with open(tmp_patch, "w", encoding="utf-8", newline="\n") as f:
         f.write(raw_patch)
 
-    # Try exact upstream patch first; only adapt context if upstream didn't already fix it
-    chk = run(["git", "apply", "--check", tmp_patch], cwd=common_dir, check=False, capture=True)
-    if chk.returncode != 0:
-        print("Upstream 50_add_susfs patch needed 2025-06 #include context adaptation; normalizing...")
-        fixed = normalize_susfs_patch_for_aosp(raw_patch)
-        with open(tmp_patch, "w", encoding="utf-8", newline="\n") as f:
-            f.write(fixed)
-        run(["git", "apply", "--check", tmp_patch], cwd=common_dir)
-
+    run(["git", "apply", "--check", tmp_patch], cwd=common_dir)
     run(["git", "apply", tmp_patch], cwd=common_dir)
 
     susfs_h = os.path.join(common_dir, "include", "linux", "susfs.h")
@@ -268,6 +165,59 @@ def apply_susfs(common_dir: str, susfs_dir: str) -> str:
     return ver
 
 
+def lock_stock_uts_and_timestamp(common_dir: str) -> None:
+    """强制锁定 UTS_RELEASE 与 UTS_VERSION，确保与 OS3.0.307.0 /system_dlkm/lib/modules/ 目录及 vermagic 100% 匹配。"""
+    # 1. Replace scripts/setlocalversion
+    setlocal_path = os.path.join(common_dir, "scripts", "setlocalversion")
+    setlocal_script = f"""#!/bin/sh
+if [ "$1" = "--save-scmversion" ]; then
+    printf '%s\\n' "{STOCK_LOCALVERSION}" > .scmversion
+    exit 0
+fi
+printf '%s\\n' "{STOCK_LOCALVERSION}"
+"""
+    with open(setlocal_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(setlocal_script)
+    os.chmod(setlocal_path, 0o755)
+
+    with open(os.path.join(common_dir, ".scmversion"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(STOCK_LOCALVERSION + "\n")
+
+    # 2. Lock LINUX_COMPILE_BY / LINUX_COMPILE_HOST in scripts/mkcompile_h
+    mkcompile_path = os.path.join(common_dir, "scripts", "mkcompile_h")
+    with open(mkcompile_path, "r", encoding="utf-8") as f:
+        mkc = f.read()
+    override_block = (
+        f'\nLINUX_COMPILE_BY="{STOCK_COMPILE_BY}"\n'
+        f'LINUX_COMPILE_HOST="{STOCK_COMPILE_HOST}"\n'
+    )
+    if "cat <<EOF" not in mkc:
+        raise RuntimeError("scripts/mkcompile_h missing 'cat <<EOF'")
+    mkc = mkc.replace("cat <<EOF", override_block + "cat <<EOF", 1)
+    with open(mkcompile_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(mkc)
+
+    # 3. Lock UTS_VERSION in init/Makefile
+    init_mk_path = os.path.join(common_dir, "init", "Makefile")
+    with open(init_mk_path, "r", encoding="utf-8") as f:
+        imk = f.read()
+    old_filechk = (
+        'filechk_uts_version = \\\n'
+        '\tutsver=$$(echo \'$(pound)\'"$(build-version)" $(smp-flag-y) $(preempt-flag-y) "$(build-timestamp)" | cut -b -64); \\\n'
+        '\techo \'$(pound)\'define UTS_VERSION \\""$${utsver}"\\"'
+    )
+    new_filechk = (
+        'filechk_uts_version = \\\n'
+        f'\techo \'$(pound)\'define UTS_VERSION \\"\'$(pound)\'1 SMP PREEMPT Wed Dec  3 02:05:30 UTC 2025\\"'
+    )
+    if old_filechk not in imk:
+        raise RuntimeError("init/Makefile filechk_uts_version block did not match expected template")
+    imk = imk.replace(old_filechk, new_filechk, 1)
+    with open(init_mk_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(imk)
+    print(f"Locked UTS_RELEASE suffix={STOCK_LOCALVERSION} and UTS_VERSION={STOCK_UTS_VERSION}")
+
+
 def configure_kernel(common_dir: str) -> None:
     defconfig = os.path.join(common_dir, "arch", "arm64", "configs", "gki_defconfig")
     with open(defconfig, "r", encoding="utf-8") as f:
@@ -275,7 +225,7 @@ def configure_kernel(common_dir: str) -> None:
 
     additions = [
         "",
-        "# SukiSU-Ultra (builtin) + SuSFS",
+        "# SukiSU (builtin) + SuSFS v2.4.0 for houji OS3.0.307.0",
         "CONFIG_KSU=y",
         "CONFIG_KSU_FEATURE_ADBROOT=y",
         "# CONFIG_KSU_DEBUG is not set",
@@ -301,7 +251,6 @@ def configure_kernel(common_dir: str) -> None:
     with open(defconfig, "w", encoding="utf-8", newline="\n") as f:
         f.write(cfg)
 
-    # Clear POST_DEFCONFIG_CMDS="check_defconfig" so added configs pass cleanly
     bc_gki = os.path.join(common_dir, "build.config.gki")
     with open(bc_gki, "r", encoding="utf-8") as f:
         bc_txt = f.read()
@@ -309,7 +258,6 @@ def configure_kernel(common_dir: str) -> None:
     with open(bc_gki, "w", encoding="utf-8", newline="\n") as f:
         f.write(bc_txt)
 
-    # Empty protected exports & protected modules lists while preserving Bazel target labels
     for pattern in ("abi_gki_protected_exports*", "gki_*_protected_modules"):
         for path in glob.glob(os.path.join(common_dir, "android", pattern)):
             print(f"Clearing {os.path.relpath(path, common_dir)}")
@@ -318,8 +266,7 @@ def configure_kernel(common_dir: str) -> None:
 
 
 def commit_clean_tree(common_dir: str, message: str) -> str:
-    # Ensure git does not ignore uapi_hdrs/include/*.h or anything required by Bazel
-    run(["git", "add", "-f", "drivers/kernelsu"], cwd=common_dir)
+    run(["git", "add", "-f", "drivers/kernelsu", ".scmversion"], cwd=common_dir)
     run(["git", "add", "-A"], cwd=common_dir)
     run(["git", "commit", "-m", message], cwd=common_dir)
     status = run(["git", "status", "--porcelain"], cwd=common_dir, capture=True).stdout.strip()
@@ -342,14 +289,15 @@ def main() -> None:
     susfs_dir = os.path.join(ws, "upstream", "susfs4ksu")
 
     ksu_version, ksu_version_full = compute_sukisu_version(ksu_dir, args.ksu_branch)
-    print(f"Resolved SukiSU-Ultra: {ksu_version} ({ksu_version_full})")
+    print(f"Resolved SukiSU: {ksu_version} ({ksu_version_full})")
 
-    wire_kernelsu_kbuild(common_dir, ksu_dir, args.ksu_branch, ksu_version, ksu_version_full)
+    wire_kernelsu_kbuild(common_dir, ksu_dir, ksu_version, ksu_version_full)
     susfs_ver = apply_susfs(common_dir, susfs_dir)
+    lock_stock_uts_and_timestamp(common_dir)
     configure_kernel(common_dir)
     head_sha = commit_clean_tree(
         common_dir,
-        f"houji: integrate SukiSU-Ultra {ksu_version_full} and SUSFS {susfs_ver}",
+        f"houji OS3.0.307.0: integrate SukiSU {ksu_version_full} and SUSFS {susfs_ver}",
     )
 
     out_env = os.environ.get("GITHUB_ENV")

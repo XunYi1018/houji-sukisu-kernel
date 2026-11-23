@@ -1,16 +1,23 @@
-name: Build houji 6.1.138 GKI + SukiSU-Ultra + SuSFS v2.4.0
+name: Build houji OS3.0.307.0 (6.1.138-g0c3d559bcd85) + SukiSU + SuSFS v2.4.0
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       ksu_branch:
-        description: "SukiSU-Ultra branch"
+        description: "SukiSU branch"
         required: false
         default: "builtin"
       susfs_branch:
         description: "susfs4ksu branch"
         required: false
         default: "gki-android14-6.1"
+      lto:
+        description: "Kleaf LTO mode (none matches OS3.0.307.0 stock /proc/config.gz)"
+        required: false
+        default: "none"
 
 jobs:
   build:
@@ -45,7 +52,7 @@ jobs:
           sudo curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod +x /usr/local/bin/repo
 
-      - name: Sync AOSP GKI android14-6.1-2025-06 (6.1.138)
+      - name: Sync AOSP GKI toolchain and exact OS3.0.307.0 commit 0c3d559bcd85
         run: |
           mkdir -p "${{ github.workspace }}/kernel_workspace"
           cd "${{ github.workspace }}/kernel_workspace"
@@ -63,22 +70,29 @@ jobs:
               f.write(textwrap.dedent(xml).lstrip())
           PY
           repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
-          echo "common HEAD: $(git -C common rev-parse HEAD)"
+          git -C common fetch --depth=1 https://android.googlesource.com/kernel/common refs/changes/52/3871752/2
+          git -C common checkout -B houji-os3-307 FETCH_HEAD
+          ACTUAL_SHA="$(git -C common rev-parse HEAD)"
+          echo "common HEAD: $ACTUAL_SHA"
+          if [ "$ACTUAL_SHA" != "0c3d559bcd85c64dae9c9c9687abbe5347fff3ad" ]; then
+            echo "ERROR: Expected 0c3d559bcd85c64dae9c9c9687abbe5347fff3ad, got $ACTUAL_SHA"
+            exit 1
+          fi
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' common/Makefile
 
-      - name: Clone SukiSU-Ultra, susfs4ksu, and AnyKernel3
+      - name: Clone latest SukiSU, susfs4ksu, and AnyKernel3
         run: |
           cd "${{ github.workspace }}/kernel_workspace"
           mkdir -p upstream
-          git clone --depth=1 --branch "${{ inputs.ksu_branch }}" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git upstream/SukiSU-Ultra
-          git clone --depth=1 --branch "${{ inputs.susfs_branch }}" https://gitlab.com/simonpunk/susfs4ksu.git upstream/susfs4ksu
+          git clone --depth=1 --branch "${{ inputs.ksu_branch || 'builtin' }}" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git upstream/SukiSU-Ultra
+          git clone --depth=1 --branch "${{ inputs.susfs_branch || 'gki-android14-6.1' }}" https://gitlab.com/simonpunk/susfs4ksu.git upstream/susfs4ksu
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git upstream/AnyKernel3
 
-      - name: Integrate SukiSU-Ultra and SuSFS v2.4.0
+      - name: Integrate SukiSU and SuSFS v2.4.0 with OS3.0.307.0 UTS_RELEASE lock
         run: |
           python3 "${{ github.workspace }}/scripts/prepare_sources.py" \
             --workspace "${{ github.workspace }}/kernel_workspace" \
-            --ksu-branch "${{ inputs.ksu_branch }}"
+            --ksu-branch "${{ inputs.ksu_branch || 'builtin' }}"
 
       - name: Build GKI kernel_aarch64 via Kleaf Bazel
         run: |
@@ -86,24 +100,24 @@ jobs:
           mkdir -p "${{ github.workspace }}/dist"
           ./tools/bazel run \
             --config=stamp \
-            --lto=thin \
+            --lto="${{ inputs.lto || 'none' }}" \
             --page_size=4k \
             --nokmi_symbol_list_strict_mode \
             --nokmi_symbol_list_violations_check \
             //common:kernel_aarch64_dist -- \
             --dist_dir="${{ github.workspace }}/dist"
 
-      - name: Verify Image and package artifacts
+      - name: Verify Image (UTS_RELEASE, SuSFS v2.4.0, module_layout CRC) and package artifacts
         run: |
           python3 "${{ github.workspace }}/scripts/package_artifacts.py" \
             --workspace "${{ github.workspace }}/kernel_workspace" \
             --dist-dir "${{ github.workspace }}/dist" \
             --out-dir "${{ github.workspace }}/release_artifacts" \
-            --kernel-string "houji 6.1.138 SukiSU-Ultra ${{ env.KSU_VERSION_FULL }} + SuSFS ${{ env.SUSFS_VERSION }}"
+            --kernel-string "houji OS3.0.307.0 6.1.138-g0c3d559bcd85 SukiSU ${{ env.KSU_VERSION_FULL }} + SuSFS ${{ env.SUSFS_VERSION }}"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: houji-6.1.138-SukiSU-SuSFS-v2.4.0
+          name: houji-OS3.0.307.0-6.1.138-g0c3d559bcd85-SukiSU-SuSFS-v2.4.0
           path: ${{ github.workspace }}/release_artifacts/*
           retention-days: 30

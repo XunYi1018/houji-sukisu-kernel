@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify built Image, build ksu_susfs_arm64 / ksu_module_susfs, and package AnyKernel3 zip."""
+"""校验针对 OS3.0.307.0 编译的 Image (UTS_RELEASE / module_layout CRC / SuSFS v2.4.0)，构建 ksu_susfs_arm64 与模块。"""
 
 import argparse
 import glob
@@ -8,6 +8,16 @@ import re
 import shutil
 import subprocess
 import zipfile
+
+
+EXPECTED_BANNER = (
+    "Linux version 6.1.138-android14-11-g0c3d559bcd85-ab14529422 "
+    "(build-user@build-host) (Android (10087095, +pgo, +bolt, +lto, -mlgo, based on r487747c) "
+    "clang version 17.0.2 (https://android.googlesource.com/toolchain/llvm-project "
+    "d9f89f4d16663d5012e5c09495f3b30ece3d2362), LLD 17.0.2) "
+    "#1 SMP PREEMPT Wed Dec  3 02:05:30 UTC 2025"
+)
+EXPECTED_MODULE_LAYOUT_CRC_LE = bytes.fromhex("7f9d75ea")  # 0xea759d7f
 
 
 ANYKERNEL_SH = """### AnyKernel3 Ramdisk Mod Script
@@ -50,27 +60,43 @@ def run(cmd, cwd=None, env=None):
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
-def verify_image(image_path: str) -> None:
+def verify_image(image_path: str, symvers_path: str) -> None:
     if not os.path.isfile(image_path):
         raise FileNotFoundError(f"Missing Image at {image_path}")
-    data = open(image_path, "rb").read()
+    with open(image_path, "rb") as f:
+        data = f.read()
     size_mb = len(data) / (1024 * 1024)
     print(f"Image size: {len(data)} bytes ({size_mb:.2f} MiB)")
 
-    # Check Linux version banner in uncompressed ARM64 Image
     m = re.search(rb"Linux version 6\.1\.138[^\x00\n]+", data)
     if not m:
         raise RuntimeError("Missing 'Linux version 6.1.138...' banner in Image!")
     banner = m.group(0).decode("utf-8", "replace")
     print("Kernel banner:", banner)
-    if "-dirty" in banner:
-        raise RuntimeError(f"Unexpected '-dirty' in kernel banner: {banner}")
+    if banner != EXPECTED_BANNER:
+        raise RuntimeError(
+            f"Banner mismatch!\n  Expected: {EXPECTED_BANNER}\n  Actual:   {banner}"
+        )
+    print("Verified exact OS3.0.307.0 kernel banner & UTS_RELEASE!")
 
-    # Verify SUSFS + PRIORITY_UID_FILTER + SukiSU presence
-    for needle in (b"susfs is initialized! version: v2.4.0", b"CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER", b"KernelSU"):
+    for needle in (
+        b"6.1.138-android14-11-g0c3d559bcd85-ab14529422 SMP preempt mod_unload modversions aarch64",
+        b"susfs is initialized! version: v2.4.0",
+        b"CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER",
+        b"KernelSU",
+        EXPECTED_MODULE_LAYOUT_CRC_LE,
+    ):
         if needle not in data:
             raise RuntimeError(f"Expected binary marker {needle!r} not found in Image!")
-    print("Verified SUSFS v2.4.0, PRIORITY_UID_FILTER, and KernelSU markers in Image.")
+    print("Verified vermagic, SUSFS v2.4.0, PRIORITY_UID_FILTER, KernelSU, and module_layout CRC (0xea759d7f) in Image.")
+
+    if os.path.isfile(symvers_path):
+        with open(symvers_path, "r", encoding="utf-8") as sf:
+            for line in sf:
+                if "\tmodule_layout\t" in line:
+                    print("vmlinux.symvers module_layout:", line.strip())
+                    if not line.startswith("0xea759d7f\t"):
+                        raise RuntimeError(f"Unexpected module_layout CRC in vmlinux.symvers: {line.strip()}")
 
 
 def collect_dotconfig(ws: str, out_dir: str) -> None:
@@ -91,7 +117,9 @@ def collect_dotconfig(ws: str, out_dir: str) -> None:
             txt = f.read()
         for key in (
             "CONFIG_ARM64_4K_PAGES",
+            "CONFIG_LTO_NONE",
             "CONFIG_LTO_CLANG_THIN",
+            "CONFIG_CFI_CLANG",
             "CONFIG_TRIM_UNUSED_KSYMS",
             "CONFIG_MODVERSIONS",
             "CONFIG_KSU",
@@ -152,7 +180,7 @@ def package_anykernel3(ws: str, image_path: str, out_dir: str, kernel_string: st
         f.write(ANYKERNEL_SH.replace("__KERNEL_STRING__", kernel_string))
 
     shutil.copy2(image_path, os.path.join(ak3_stage, "Image"))
-    ak3_zip = os.path.join(out_dir, "AnyKernel3-houji-6.1.138-SukiSU-SuSFS-v2.4.0.zip")
+    ak3_zip = os.path.join(out_dir, "AnyKernel3-houji-OS3.0.307.0-6.1.138-SukiSU-SuSFS-v2.4.0.zip")
     with zipfile.ZipFile(ak3_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(ak3_stage):
             for fn in sorted(files):
@@ -168,7 +196,7 @@ def main() -> None:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--dist-dir", required=True)
     parser.add_argument("--out-dir", required=True)
-    parser.add_argument("--kernel-string", default="houji 6.1.138 SukiSU-Ultra + SuSFS v2.4.0")
+    parser.add_argument("--kernel-string", default="houji OS3.0.307.0 6.1.138 SukiSU + SuSFS v2.4.0")
     args = parser.parse_args()
 
     ws = os.path.abspath(args.workspace)
@@ -177,7 +205,8 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     image_path = os.path.join(dist_dir, "Image")
-    verify_image(image_path)
+    symvers_path = os.path.join(dist_dir, "vmlinux.symvers")
+    verify_image(image_path, symvers_path)
 
     for artifact in ("Image", "vmlinux.symvers", "System.map", "modules.builtin", "modules.builtin.modinfo"):
         src = os.path.join(dist_dir, artifact)
