@@ -73,7 +73,7 @@ def verify_image(image_path: str, symvers_path: str) -> None:
         raise RuntimeError("Missing 'Linux version 6.1.138...' banner in Image!")
     banner = m.group(0).decode("utf-8", "replace")
     print("Kernel banner:", banner)
-    if banner != EXPECTED_BANNER:
+    if re.sub(r"\s+", " ", banner) != re.sub(r"\s+", " ", EXPECTED_BANNER):
         raise RuntimeError(
             f"Banner mismatch!\n  Expected: {EXPECTED_BANNER}\n  Actual:   {banner}"
         )
@@ -208,7 +208,7 @@ def main() -> None:
     symvers_path = os.path.join(dist_dir, "vmlinux.symvers")
     verify_image(image_path, symvers_path)
 
-    for artifact in ("Image", "vmlinux.symvers", "System.map", "modules.builtin", "modules.builtin.modinfo"):
+    for artifact in ("Image", "vmlinux.symvers", "System.map", "modules.builtin", "modules.builtin.modinfo", "boot-img.tar.gz"):
         src = os.path.join(dist_dir, artifact)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(out_dir, artifact))

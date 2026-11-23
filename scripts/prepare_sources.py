@@ -295,7 +295,7 @@ printf '%s\\n' "{STOCK_LOCALVERSION}"
     )
     new_filechk = (
         'filechk_uts_version = \\\n'
-        f'\techo \'$(pound)\'define UTS_VERSION \\"\'$(pound)\'1 SMP PREEMPT Wed Dec  3 02:05:30 UTC 2025\\"'
+        '\tprintf \'%s\\n\' \'$(pound)define UTS_VERSION "$(pound)1 SMP PREEMPT Wed Dec  3 02:05:30 UTC 2025"\''
     )
     if old_filechk not in imk:
         raise RuntimeError("init/Makefile filechk_uts_version block did not match expected template")
