@@ -54,7 +54,8 @@ def compute_sukisu_version(ksu_dir: str, branch: str) -> tuple[int, str]:
 
     if commit_count is None:
         res = run(["git", "rev-list", "--count", "HEAD"], cwd=ksu_dir, check=False, capture=True)
-        commit_count = int(res.stdout.strip()) if res.returncode == 0 else 4005
+        cnt = int(res.stdout.strip()) if res.returncode == 0 and res.stdout.strip().isdigit() else 0
+        commit_count = cnt if cnt > 100 else 4005
 
     ksu_version = KSU_VERSION_BASE + commit_count - KSU_VERSION_OFFSET
     ksu_version_full = f"v4.3.0-{short_sha}@{branch}"
@@ -139,6 +140,85 @@ def wire_kernelsu_kbuild(common_dir: str, ksu_dir: str, ksu_version: int, ksu_ve
         f.write(ksu_mk_txt)
 
 
+def normalize_susfs_patch_for_aosp(patch_text: str) -> str:
+    """适配 6.1.138 (0c3d559bcd85) 与 6.1.157 之间 fs/exec.c、fs/namespace.c、fs/proc/base.c 的 3 处末尾 #include 上下文。"""
+    text = patch_text.replace("\r\n", "\n")
+
+    replacements = [
+        (
+            """ #include <linux/io_uring.h>
+ #include <linux/syscall_user_dispatch.h>
+ #include <linux/coredump.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif
+ 
+ #ifndef __GENKSYMS__
+ #include <linux/dma-buf.h>""",
+            """ #include <linux/io_uring.h>
+ #include <linux/syscall_user_dispatch.h>
+ #include <linux/coredump.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif
+ 
+ #include <linux/uaccess.h>
+ #include <asm/mmu_context.h>""",
+        ),
+        (
+            """@@ -32,11 +32,21 @@
+ #include <linux/fs_context.h>
+ #include <linux/shmem_fs.h>
+ #include <linux/mnt_idmapping.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ #include "pnode.h"
+ #include "internal.h"
+ #include <trace/hooks/blk.h>""",
+            """@@ -32,10 +32,20 @@
+ #include <linux/fs_context.h>
+ #include <linux/shmem_fs.h>
+ #include <linux/mnt_idmapping.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ #include "pnode.h"
+ #include "internal.h\"""",
+        ),
+        (
+            """@@ -100,6 +100,10 @@
+ #include <linux/cn_proc.h>
+ #include <linux/cpufreq_times.h>
+ #include <linux/dma-buf.h>
++#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++#include <linux/susfs_def.h>
++#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++
+ #include <trace/events/oom.h>
+ #include <trace/hooks/sched.h>
+ #include "internal.h\"""",
+            """@@ -100,5 +100,9 @@
+ #include <linux/cn_proc.h>
+ #include <linux/cpufreq_times.h>
++#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++#include <linux/susfs_def.h>
++#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++
+ #include <trace/events/oom.h>
+ #include <trace/hooks/sched.h>
+ #include "internal.h\"""",
+        ),
+    ]
+
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new, 1)
+    return text
+
+
 def apply_susfs(common_dir: str, susfs_dir: str) -> str:
     kp_dir = os.path.join(susfs_dir, "kernel_patches")
     for src in glob.glob(os.path.join(kp_dir, "fs", "*")):
@@ -154,7 +234,14 @@ def apply_susfs(common_dir: str, susfs_dir: str) -> str:
     with open(tmp_patch, "w", encoding="utf-8", newline="\n") as f:
         f.write(raw_patch)
 
-    run(["git", "apply", "--check", tmp_patch], cwd=common_dir)
+    chk = run(["git", "apply", "--check", tmp_patch], cwd=common_dir, check=False, capture=True)
+    if chk.returncode != 0:
+        print("Adapting 50_add_susfs_in_gki-android14-6.1.patch #include context for 6.1.138 (0c3d559bcd85)...")
+        fixed = normalize_susfs_patch_for_aosp(raw_patch)
+        with open(tmp_patch, "w", encoding="utf-8", newline="\n") as f:
+            f.write(fixed)
+        run(["git", "apply", "--check", tmp_patch], cwd=common_dir)
+
     run(["git", "apply", tmp_patch], cwd=common_dir)
 
     susfs_h = os.path.join(common_dir, "include", "linux", "susfs.h")
