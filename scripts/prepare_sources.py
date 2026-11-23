@@ -244,6 +244,26 @@ def apply_susfs(common_dir: str, susfs_dir: str) -> str:
 
     run(["git", "apply", tmp_patch], cwd=common_dir)
 
+    # SuSFS overrides [SEL_ACCESS] via susfs_sel_write_access() after SukiSU's sepolicy rules bump
+    # state->policy->latest_granting; pin app-visible avd.seqno to stock value 1 as SukiSU's
+    # my_write_access() does when selinux_hide is active.
+    selinuxfs_path = os.path.join(common_dir, "security", "selinux", "selinuxfs.c")
+    with open(selinuxfs_path, "r", encoding="utf-8") as f:
+        selinuxfs_txt = f.read()
+    target_call = "\tsusfs_security_compute_av_user(state, ssid, tsid, tclass, &avd);\n"
+    if selinuxfs_txt.count(target_call) != 1:
+        raise RuntimeError(
+            f"Expected 1 occurrence of susfs_security_compute_av_user call in selinuxfs.c, found {selinuxfs_txt.count(target_call)}"
+        )
+    selinuxfs_txt = selinuxfs_txt.replace(
+        target_call,
+        target_call + "\tavd.seqno = 1;\n",
+        1,
+    )
+    with open(selinuxfs_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(selinuxfs_txt)
+    print("Patched security/selinux/selinuxfs.c: pinned avd.seqno = 1 in susfs_sel_write_access()")
+
     susfs_h = os.path.join(common_dir, "include", "linux", "susfs.h")
     with open(susfs_h, "r", encoding="utf-8") as f:
         m = re.search(r'^#define\s+SUSFS_VERSION\s+"([^"]+)"', f.read(), re.M)
